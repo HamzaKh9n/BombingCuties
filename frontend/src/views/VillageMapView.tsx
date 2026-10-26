@@ -323,10 +323,10 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         return (
-          res.full_name.toLowerCase().includes(q) ||
-          res.code.toLowerCase().includes(q) ||
-          res.medical_condition.toLowerCase().includes(q) ||
-          res.neighborhood_name.toLowerCase().includes(q)
+          (res.full_name || '').toLowerCase().includes(q) ||
+          (res.code || '').toLowerCase().includes(q) ||
+          (res.medical_condition || '').toLowerCase().includes(q) ||
+          (res.neighborhood_name || '').toLowerCase().includes(q)
         );
       }
       return true;

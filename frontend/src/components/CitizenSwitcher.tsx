@@ -30,9 +30,9 @@ export const CitizenSwitcher: React.FC<CitizenSwitcherProps> = ({
     if (!filterSearch.trim()) return true;
     const q = filterSearch.toLowerCase();
     return (
-      r.full_name.toLowerCase().includes(q) ||
-      r.code.toLowerCase().includes(q) ||
-      r.neighborhood_name.toLowerCase().includes(q)
+      (r.full_name || '').toLowerCase().includes(q) ||
+      (r.code || '').toLowerCase().includes(q) ||
+      (r.neighborhood_name || '').toLowerCase().includes(q)
     );
   });
 

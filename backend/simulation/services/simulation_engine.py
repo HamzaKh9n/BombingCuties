@@ -429,6 +429,7 @@ def apply_simulated_incident(
         critical_injuries_count = 0
 
         router = GraphRouter(village_id=village_id)
+        resident_outcomes_list = []
 
         for res in residents:
             dist = euclidean_distance((res.x, res.y), (epicenter_x, epicenter_y))
@@ -455,6 +456,14 @@ def apply_simulated_incident(
                 minor_injuries_count += 1
 
             is_fatality = outcome["is_fatality"]
+
+            resident_outcomes_list.append({
+                "resident_id": res.id,
+                "name": res.full_name,
+                "triage_category": resulting_triage,
+                "is_fatality": is_fatality,
+                "distance_from_epicenter": round(dist, 1),
+            })
 
             # Apply resident update
             res.triage_category = resulting_triage
@@ -580,5 +589,7 @@ def apply_simulated_incident(
             "minor_injuries_count": minor_injuries_count,
             "residents_unaffected_count": residents_unaffected_count,
             "confirmed_at": incident.confirmed_at.isoformat(),
-        }
+        },
+        "affected_residents_count": affected_count,
+        "resident_outcomes": resident_outcomes_list,
     }

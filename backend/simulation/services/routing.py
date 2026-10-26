@@ -224,6 +224,22 @@ class GraphRouter:
         """
         Calculates optimal facility destination and route (with shortest vs safest comparison).
         """
+        # Fatality check: deceased casualties are excluded from active evacuation
+        if resident.is_fatality or resident.active_triage == "EXPECTANT":
+            return {
+                "status": "cancelled",
+                "message": "Resident is confirmed deceased (EXPECTANT). Evacuation routing is cancelled; clinical triage protocol excludes fatalities from emergency transit.",
+                "resident": {
+                    "id": resident.id,
+                    "code": resident.code,
+                    "name": resident.full_name,
+                    "triage_category": "EXPECTANT",
+                    "is_fatality": True,
+                },
+                "recommended_destination": None,
+                "all_facility_evaluations": [],
+            }
+
         # Find nearest road node to resident
         resident_node = find_nearest_node(resident.x, resident.y, self.village_id)
         if not resident_node:

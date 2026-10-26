@@ -54,10 +54,10 @@ export const AllVillagersModal: React.FC<AllVillagersModalProps> = ({
       const q = search.toLowerCase();
       list = list.filter(
         (r) =>
-          r.full_name.toLowerCase().includes(q) ||
-          r.code.toLowerCase().includes(q) ||
-          r.medical_condition.toLowerCase().includes(q) ||
-          r.neighborhood_name.toLowerCase().includes(q)
+          (r.full_name || '').toLowerCase().includes(q) ||
+          (r.code || '').toLowerCase().includes(q) ||
+          (r.medical_condition || '').toLowerCase().includes(q) ||
+          (r.neighborhood_name || '').toLowerCase().includes(q)
       );
     }
 
