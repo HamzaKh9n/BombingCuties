@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   ZoomIn,
   ZoomOut,
@@ -60,9 +60,23 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
   const [zoom, setZoom] = useState(1.0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [isWheelZooming, setIsWheelZooming] = useState(false);
 
-  // Inspection Drawer state
+  // Synchronized refs for event handlers to avoid stale closures
+  const zoomRef = useRef(zoom);
+  const panRef = useRef(pan);
+  const isDraggingRef = useRef(false);
+  const dragStartRef = useRef({ x: 0, y: 0 });
+  const startMouseRef = useRef({ x: 0, y: 0 });
+  const hasDraggedRef = useRef(false);
+  const wheelTimeoutRef = useRef<any>(null);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+    panRef.current = pan;
+  }, [zoom, pan]);
+
+  // Inspection Drawer & Selection state
   const [selectedResident, setSelectedResident] = useState<Resident | null>(null);
   const [selectedFacility, setSelectedFacility] = useState<MedicalFacility | null>(null);
   const [selectedBuilding, setSelectedBuilding] = useState<Building | null>(null);
@@ -73,18 +87,9 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
   const [activeRoutePlan, setActiveRoutePlan] = useState<EvacuationPlan | null>(null);
   const [loadingRoute, setLoadingRoute] = useState(false);
 
-  // Hover Tooltip State
-  const [hoveredResident, setHoveredResident] = useState<{
-    resident: Resident;
-    clientX: number;
-    clientY: number;
-  } | null>(null);
-
-  const [hoveredFacility, setHoveredFacility] = useState<{
-    facility: MedicalFacility;
-    clientX: number;
-    clientY: number;
-  } | null>(null);
+  // Hover Tooltip State (Stores target objects directly for accurate coordinate anchoring)
+  const [hoveredResident, setHoveredResident] = useState<Resident | null>(null);
+  const [hoveredFacility, setHoveredFacility] = useState<MedicalFacility | null>(null);
 
   // Filters & Layer Toggles
   const [triageFilter, setTriageFilter] = useState<string>('ALL');
@@ -228,28 +233,215 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
     setActiveRoutePlan(null);
   };
 
-  // Pan & Drag handlers
+  const svgRef = useRef<SVGSVGElement | null>(null);
+
+  // 1. Mouse-Wheel Zoom Anchored Toward Cursor
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      // Prevent browser default window scrolling while cursor is over the map canvas
+      e.preventDefault();
+      e.stopPropagation();
+
+      const rect = container.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const cursorY = e.clientY - rect.top;
+
+      const currentZoom = zoomRef.current;
+      const currentPan = panRef.current;
+
+      // Smooth zoom factor based on scroll wheel direction
+      const zoomFactor = e.deltaY < 0 ? 1.14 : 1 / 1.14;
+      const nextZoom = Math.min(3.5, Math.max(0.45, Number((currentZoom * zoomFactor).toFixed(3))));
+      if (nextZoom === currentZoom) return;
+
+      // Anchor geographic point under the cursor
+      const scaleRatio = nextZoom / currentZoom;
+      const nextPanX = Math.round(cursorX - (cursorX - currentPan.x) * scaleRatio);
+      const nextPanY = Math.round(cursorY - (cursorY - currentPan.y) * scaleRatio);
+
+      setIsWheelZooming(true);
+      if (wheelTimeoutRef.current) clearTimeout(wheelTimeoutRef.current);
+      wheelTimeoutRef.current = setTimeout(() => setIsWheelZooming(false), 120);
+
+      setZoom(nextZoom);
+      setPan({ x: nextPanX, y: nextPanY });
+    };
+
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      container.removeEventListener('wheel', handleWheel);
+      if (wheelTimeoutRef.current) clearTimeout(wheelTimeoutRef.current);
+    };
+  }, []);
+
+  // 2. Global Mouse Drag Handlers (Smooth Panning without Losing Grab)
+  useEffect(() => {
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+
+      const dx = e.clientX - startMouseRef.current.x;
+      const dy = e.clientY - startMouseRef.current.y;
+      if (Math.hypot(dx, dy) > 4) {
+        hasDraggedRef.current = true;
+      }
+
+      setPan({
+        x: Math.round(e.clientX - dragStartRef.current.x),
+        y: Math.round(e.clientY - dragStartRef.current.y),
+      });
+    };
+
+    const handleGlobalMouseUp = () => {
+      if (isDraggingRef.current) {
+        isDraggingRef.current = false;
+        setIsDragging(false);
+      }
+    };
+
+    window.addEventListener('mousemove', handleGlobalMouseMove);
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleGlobalMouseMove);
+      window.removeEventListener('mouseup', handleGlobalMouseUp);
+    };
+  }, []);
+
+  // Initiate click-and-drag panning
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0) return; // Only left click
+
+    // Don't drag if interacting with buttons, controls, or panels
+    const target = e.target as HTMLElement;
+    if (
+      target.closest('button') ||
+      target.closest('.map-tooltip') ||
+      target.closest('.citizen-anchored-popup') ||
+      target.closest('.compact-summary-bar') ||
+      target.closest('.map-legend-card') ||
+      target.closest('.docked-hud') ||
+      target.closest('.drawer-panel')
+    ) {
+      return;
+    }
+
+    isDraggingRef.current = true;
+    dragStartRef.current = { x: e.clientX - panRef.current.x, y: e.clientY - panRef.current.y };
+    startMouseRef.current = { x: e.clientX, y: e.clientY };
+    hasDraggedRef.current = false;
     setIsDragging(true);
-    setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
   };
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDragging) return;
-    setPan({
-      x: e.clientX - dragStart.x,
-      y: e.clientY - dragStart.y,
-    });
+  // Mobile Touch Support for Panning
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      const target = e.target as HTMLElement;
+      if (target.closest('button') || target.closest('.citizen-anchored-popup') || target.closest('.map-tooltip')) return;
+
+      isDraggingRef.current = true;
+      dragStartRef.current = { x: t.clientX - panRef.current.x, y: t.clientY - panRef.current.y };
+      startMouseRef.current = { x: t.clientX, y: t.clientY };
+      hasDraggedRef.current = false;
+      setIsDragging(true);
+    }
   };
 
-  const handleMouseUp = () => {
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length === 1 && isDraggingRef.current) {
+      const t = e.touches[0];
+      const dx = t.clientX - startMouseRef.current.x;
+      const dy = t.clientY - startMouseRef.current.y;
+      if (Math.hypot(dx, dy) > 5) {
+        hasDraggedRef.current = true;
+      }
+      setPan({
+        x: Math.round(t.clientX - dragStartRef.current.x),
+        y: Math.round(t.clientY - dragStartRef.current.y),
+      });
+    }
+  };
+
+  const handleTouchEnd = () => {
+    isDraggingRef.current = false;
     setIsDragging(false);
   };
 
-  // Zoom controls
+  // 3. Sub-Pixel Exact Marker Coordinate Anchoring
+  const getMarkerScreenCoords = useCallback((worldX: number, worldY: number) => {
+    if (svgRef.current && containerRef.current) {
+      try {
+        const pt = svgRef.current.createSVGPoint();
+        pt.x = worldX;
+        pt.y = worldY;
+        const ctm = svgRef.current.getScreenCTM();
+        if (ctm) {
+          const screenPt = pt.matrixTransform(ctm);
+          const containerRect = containerRef.current.getBoundingClientRect();
+          return {
+            x: screenPt.x - containerRect.left,
+            y: screenPt.y - containerRect.top,
+          };
+        }
+      } catch {
+        // fallback to formula
+      }
+    }
+    return {
+      x: worldX * zoom + pan.x,
+      y: worldY * zoom + pan.y,
+    };
+  }, [zoom, pan]);
+
+  // Compute container-bounded anchored popup style
+  const getAnchoredPopupStyle = useCallback((
+    worldX: number,
+    worldY: number,
+    popupWidth = 285,
+    popupHeight = 185
+  ) => {
+    const { x: markerX, y: markerY } = getMarkerScreenCoords(worldX, worldY);
+    const containerW = containerRef.current?.clientWidth || 1100;
+    const containerH = containerRef.current?.clientHeight || 750;
+
+    // Default: place to the right of the marker
+    let left = markerX + 16;
+    let placement: 'right' | 'left' = 'right';
+
+    // If overflowing right boundary, flip to left
+    if (left + popupWidth > containerW - 14) {
+      left = markerX - popupWidth - 16;
+      placement = 'left';
+    }
+    // Clamp horizontally inside container
+    left = Math.max(12, Math.min(containerW - popupWidth - 12, left));
+
+    // Vertical position: centered on marker
+    let top = markerY - popupHeight / 2;
+    // Keep below top summary strip (~56px)
+    if (top < 56) {
+      top = Math.max(56, markerY + 16);
+    }
+    // If overflowing bottom boundary, move above
+    if (top + popupHeight > containerH - 18) {
+      top = Math.max(56, markerY - popupHeight - 16);
+    }
+    // Clamp vertically inside container
+    top = Math.max(56, Math.min(containerH - popupHeight - 18, top));
+
+    return {
+      left: Math.round(left),
+      top: Math.round(top),
+      placement,
+    };
+  }, [getMarkerScreenCoords]);
+
+  // Zoom helper (for programmatic or reset buttons)
   const handleZoom = (delta: number) => {
-    setZoom((prev) => Math.min(2.5, Math.max(0.6, prev + delta)));
+    const nextZoom = Math.min(3.5, Math.max(0.45, zoom + delta));
+    setZoom(nextZoom);
   };
 
   // Reconciled population metrics computed directly from persistent mapData
@@ -553,39 +745,31 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
           <button
             className="btn btn-sm"
             onClick={fitVillageToViewport}
-            style={{ padding: '6px 10px', fontSize: 11, backgroundColor: '#FFFFFF' }}
-            title="Fit whole village to screen"
+            style={{ padding: '6px 11px', fontSize: 11, backgroundColor: '#FFFFFF', gap: 5 }}
+            title="Reset view and fit complete village to viewport"
           >
             <Maximize2 size={13} />
             <span>Fit Village</span>
           </button>
 
-          {/* Zoom Buttons */}
+          {/* Clean Map Navigation Guide Pill */}
           <div
             style={{
               display: 'flex',
               alignItems: 'center',
+              gap: 5,
+              padding: '5px 10px',
               backgroundColor: 'rgba(255, 255, 255, 0.95)',
               border: '1px solid #D6CEBE',
               borderRadius: 4,
-              overflow: 'hidden',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+              fontSize: 10.5,
+              fontWeight: 600,
+              color: '#55615B',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.04)',
             }}
+            title="Scroll wheel to zoom into cursor position • Click and drag to pan across the village"
           >
-            <button
-              onClick={() => handleZoom(0.25)}
-              title="Zoom In"
-              style={{ padding: '6px 8px', background: 'none', border: 'none', cursor: 'pointer', borderRight: '1px solid #E2DBD0' }}
-            >
-              <ZoomIn size={14} color="#333" />
-            </button>
-            <button
-              onClick={() => handleZoom(-0.25)}
-              title="Zoom Out"
-              style={{ padding: '6px 8px', background: 'none', border: 'none', cursor: 'pointer' }}
-            >
-              <ZoomOut size={14} color="#333" />
-            </button>
+            <span>Scroll to Zoom • Drag to Pan</span>
           </div>
         </div>
       </div>
@@ -712,23 +896,26 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
       {/* 3. MAIN SVG INTERACTIVE MAP CANVAS */}
       <div
         onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
         style={{
           width: '100%',
           height: '100%',
           cursor: isDragging ? 'grabbing' : 'grab',
           userSelect: 'none',
+          touchAction: 'none',
         }}
       >
         <svg
+          ref={svgRef}
           viewBox="0 0 1200 800"
           style={{
             width: '100%',
             height: '100%',
             transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
             transformOrigin: '0 0',
-            transition: isDragging ? 'none' : 'transform 0.1s ease-out',
+            transition: (isDragging || isWheelZooming) ? 'none' : 'transform 0.08s ease-out',
           }}
           xmlns="http://www.w3.org/2000/svg"
         >
@@ -898,7 +1085,17 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
                 const midY = coords && coords.length >= 2 ? (coords[0][1] + coords[1][1]) / 2 : 0;
 
                 return (
-                  <g key={edge.id} onClick={() => { setSelectedRoad(edge); setSelectedResident(null); setSelectedFacility(null); setSelectedBuilding(null); }} style={{ cursor: 'pointer' }}>
+                  <g
+                    key={edge.id}
+                    onClick={() => {
+                      if (hasDraggedRef.current) return;
+                      setSelectedRoad(edge);
+                      setSelectedResident(null);
+                      setSelectedFacility(null);
+                      setSelectedBuilding(null);
+                    }}
+                    style={{ cursor: 'pointer' }}
+                  >
                     {/* Road Underlay */}
                     <path
                       d={pathD}
@@ -1063,6 +1260,7 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
                     key={bld.id}
                     onClick={(e) => {
                       e.stopPropagation();
+                      if (hasDraggedRef.current) return;
                       setSelectedBuilding(bld);
                       setSelectedResident(null);
                       setSelectedFacility(null);
@@ -1205,12 +1403,15 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
                     key={fac.id}
                     onClick={(e) => {
                       e.stopPropagation();
+                      if (hasDraggedRef.current) return;
                       setSelectedFacility(fac);
                       setSelectedResident(null);
                       setSelectedBuilding(null);
                       setSelectedRoad(null);
                     }}
-                    onMouseEnter={(e) => setHoveredFacility({ facility: fac, clientX: e.clientX, clientY: e.clientY })}
+                    onMouseEnter={() => {
+                      if (!isDraggingRef.current) setHoveredFacility(fac);
+                    }}
                     onMouseLeave={() => setHoveredFacility(null)}
                     style={{ cursor: 'pointer' }}
                   >
@@ -1291,9 +1492,12 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
                     key={res.id}
                     onClick={(e) => {
                       e.stopPropagation();
+                      if (hasDraggedRef.current) return;
                       handleSelectResident(res);
                     }}
-                    onMouseEnter={(e) => setHoveredResident({ resident: res, clientX: e.clientX, clientY: e.clientY })}
+                    onMouseEnter={() => {
+                      if (!isDraggingRef.current) setHoveredResident(res);
+                    }}
                     onMouseLeave={() => setHoveredResident(null)}
                     style={{ cursor: 'pointer' }}
                   >
@@ -1454,102 +1658,240 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
         </svg>
       </div>
 
-      {/* 4. HOVER TOOLTIP FOR RESIDENTS (Desktop hover + mobile tap) */}
-      {hoveredResident && (
-        <div
-          className="map-tooltip"
-          style={{
-            left: Math.min(window.innerWidth - 300, Math.max(16, hoveredResident.clientX + 14)),
-            top: Math.min(window.innerHeight - 180, Math.max(80, hoveredResident.clientY - 20)),
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-            <span className="mono" style={{ fontSize: 11, fontWeight: 700, color: '#77847E' }}>
-              [{hoveredResident.resident.code}]
-            </span>
-            <TriageBadge triage={hoveredResident.resident.active_triage} isFatality={hoveredResident.resident.is_fatality} />
-          </div>
+      {/* 4. ANCHORED POPUP FOR SELECTED RESIDENT (Positioned directly beside citizen marker) */}
+      {selectedResident && (() => {
+        const popupStyle = getAnchoredPopupStyle(selectedResident.x, selectedResident.y, 290, 205);
+        const visuals = getResidentVisuals(selectedResident.active_triage, selectedResident.is_fatality);
+        const isCitizen = selectedResident.id === activeCitizenId;
+        const isInjured = !selectedResident.is_fatality && selectedResident.active_triage !== 'STABLE' && selectedResident.active_triage !== 'EXPECTANT';
 
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#1C211F' }}>
-            {hoveredResident.resident.full_name}
-          </div>
+        return (
+          <div
+            className="citizen-anchored-popup"
+            style={{
+              position: 'absolute',
+              left: popupStyle.left,
+              top: popupStyle.top,
+              zIndex: 110,
+              width: 290,
+              backgroundColor: '#FFFFFF',
+              border: `1.5px solid ${visuals.borderColor || '#D6CEBE'}`,
+              borderRadius: 6,
+              boxShadow: '0 8px 26px rgba(0,0,0,0.16)',
+              padding: '12px 14px',
+              pointerEvents: 'auto',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            {/* Header: Code + Name + Close */}
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 6, marginBottom: 5 }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span className="mono" style={{ fontSize: 11, fontWeight: 700, color: '#77847E' }}>
+                    [{selectedResident.code}]
+                  </span>
+                  {isCitizen && (
+                    <span style={{ fontSize: 9.5, fontWeight: 700, padding: '1px 5px', borderRadius: 2, backgroundColor: '#E7F2EB', color: '#2A6642' }}>
+                      YOU
+                    </span>
+                  )}
+                  <TriageBadge triage={selectedResident.active_triage} isFatality={selectedResident.is_fatality} />
+                </div>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: '#1C211F', marginTop: 3 }}>
+                  {selectedResident.full_name}
+                </div>
+                <div style={{ fontSize: 11, color: '#68746E' }}>
+                  {selectedResident.neighborhood_name} • Age {selectedResident.age} {selectedResident.gender}
+                </div>
+              </div>
 
-          <div style={{ fontSize: 11, color: '#68746E', marginTop: 1 }}>
-            {hoveredResident.resident.neighborhood_name}
-          </div>
-
-          <div style={{ marginTop: 6, fontSize: 11.5, color: '#333F39', lineHeight: 1.3 }}>
-            <strong>Condition: </strong>
-            {hoveredResident.resident.medical_condition}
-          </div>
-
-          {hoveredResident.resident.is_fatality || hoveredResident.resident.active_triage === 'EXPECTANT' ? (
-            <div style={{ marginTop: 6, padding: '3px 6px', backgroundColor: '#252A28', color: '#FFFFFF', borderRadius: 3, fontSize: 10.5, fontWeight: 600 }}>
-              Fatal trauma. Excluded from active vehicle evacuation.
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedResident(null);
+                  if (onSelectResident) onSelectResident(null);
+                }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#77847E', padding: 2 }}
+                title="Dismiss popup"
+              >
+                <X size={15} />
+              </button>
             </div>
-          ) : (
-            <div style={{ marginTop: 6, fontSize: 11, color: '#2A6642' }}>
-              Status: <strong>{hoveredResident.resident.evacuation_status}</strong>
-              {hoveredResident.resident.assigned_facility_name && (
-                <span> • Dest: {hoveredResident.resident.assigned_facility_name}</span>
+
+            {/* Condition */}
+            <div style={{ fontSize: 11.5, color: '#333F39', lineHeight: 1.35, padding: '5px 8px', backgroundColor: '#FAF8F3', borderRadius: 4, border: '1px solid #EAE3D5', marginBottom: 7 }}>
+              <strong>Condition: </strong>{selectedResident.medical_condition}
+            </div>
+
+            {/* Telemetry vitals summary */}
+            {selectedResident.latest_vitals && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10.5, color: '#55615B', marginBottom: 7, padding: '4px 7px', backgroundColor: '#F6F4EF', borderRadius: 4 }}>
+                <span>HR: <strong>{selectedResident.latest_vitals.heart_rate ?? '--'} bpm</strong></span>
+                <span>SpO2: <strong>{selectedResident.latest_vitals.spo2 ?? '--'}%</strong></span>
+                <span>BP: <strong>{selectedResident.latest_vitals.blood_pressure || '--'}</strong></span>
+              </div>
+            )}
+
+            {/* Status / Hospital Destination */}
+            <div style={{ fontSize: 11, color: selectedResident.is_fatality ? '#1C211F' : '#2A6642', marginBottom: 8 }}>
+              {selectedResident.is_fatality || selectedResident.active_triage === 'EXPECTANT' ? (
+                <span>Status: <strong>Fatal blast injury (Asystole)</strong></span>
+              ) : (
+                <span>
+                  Status: <strong>{selectedResident.evacuation_status}</strong>
+                  {selectedResident.assigned_facility_name && (
+                    <span> • Destination: <strong>{selectedResident.assigned_facility_name}</strong></span>
+                  )}
+                </span>
               )}
             </div>
-          )}
 
-          <div style={{ marginTop: 6, fontSize: 10, color: '#888', fontStyle: 'italic' }}>
-            Click marker to inspect complete record & route
+            {/* Action buttons */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, borderTop: '1px solid #EDE8DE', paddingTop: 8 }}>
+              {isInjured && (
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleSelectResident(selectedResident);
+                  }}
+                  style={{ flex: 1, padding: '4px 8px', fontSize: 11, justifyContent: 'center' }}
+                >
+                  <Navigation size={12} />
+                  <span>Highlight Route</span>
+                </button>
+              )}
+              {onNavigateToPatient && (
+                <button
+                  className="btn btn-sm"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onNavigateToPatient(selectedResident.id);
+                  }}
+                  style={{ padding: '4px 8px', fontSize: 11 }}
+                  title="Open full patient registry record"
+                >
+                  <Stethoscope size={12} />
+                  <span>Full Record</span>
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
-      {/* 5. HOVER TOOLTIP FOR MEDICAL FACILITIES */}
-      {hoveredFacility && (
-        <div
-          className="map-tooltip"
-          style={{
-            left: Math.min(window.innerWidth - 320, Math.max(16, hoveredFacility.clientX + 14)),
-            top: Math.min(window.innerHeight - 200, Math.max(80, hoveredFacility.clientY - 20)),
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-            <span className="mono" style={{ fontSize: 11, fontWeight: 700, color: '#77847E' }}>
-              [{hoveredFacility.facility.code}]
-            </span>
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 700,
-                padding: '2px 6px',
-                borderRadius: 3,
-                backgroundColor: hoveredFacility.facility.available_capacity > 0 ? '#E7F2EB' : '#FCECE9',
-                color: hoveredFacility.facility.available_capacity > 0 ? '#2A6642' : '#BD3423',
-              }}
-            >
-              {hoveredFacility.facility.operational_status}
-            </span>
-          </div>
+      {/* 5. HOVER TOOLTIP FOR RESIDENTS (Anchored directly beside marker) */}
+      {hoveredResident && hoveredResident.id !== selectedResident?.id && (() => {
+        const pos = getAnchoredPopupStyle(hoveredResident.x, hoveredResident.y, 260, 150);
+        return (
+          <div
+            className="map-tooltip"
+            style={{
+              position: 'absolute',
+              left: pos.left,
+              top: pos.top,
+              transform: 'none',
+              pointerEvents: 'none',
+              zIndex: 105,
+              width: 260,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 }}>
+              <span className="mono" style={{ fontSize: 11, fontWeight: 700, color: '#77847E' }}>
+                [{hoveredResident.code}]
+              </span>
+              <TriageBadge triage={hoveredResident.active_triage} isFatality={hoveredResident.is_fatality} />
+            </div>
 
-          <div style={{ fontSize: 13, fontWeight: 700, color: '#1C211F' }}>
-            {hoveredFacility.facility.name}
-          </div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#1C211F' }}>
+              {hoveredResident.full_name}
+            </div>
 
-          <div style={{ fontSize: 11, color: '#68746E', marginTop: 1 }}>
-            {hoveredFacility.facility.neighborhood_name} • {hoveredFacility.facility.facility_type.replace('_', ' ')}
-          </div>
+            <div style={{ fontSize: 11, color: '#68746E', marginTop: 1 }}>
+              {hoveredResident.neighborhood_name}
+            </div>
 
-          <div style={{ marginTop: 6, fontSize: 11.5, color: '#1C211F' }}>
-            Available Beds: <strong>{hoveredFacility.facility.available_capacity} free</strong> / {hoveredFacility.facility.total_capacity} total
-          </div>
+            <div style={{ marginTop: 5, fontSize: 11, color: '#333F39', lineHeight: 1.3 }}>
+              <strong>Condition: </strong>
+              {hoveredResident.medical_condition}
+            </div>
 
-          <div style={{ marginTop: 4, fontSize: 10.5, color: '#66736D' }}>
-            Access Roadway: <strong>{hoveredFacility.facility.access_road_status}</strong> • Channel: <strong>{hoveredFacility.facility.contact_channel}</strong>
-          </div>
+            {hoveredResident.is_fatality || hoveredResident.active_triage === 'EXPECTANT' ? (
+              <div style={{ marginTop: 5, padding: '2px 5px', backgroundColor: '#252A28', color: '#FFFFFF', borderRadius: 3, fontSize: 10, fontWeight: 600 }}>
+                Fatal trauma. Excluded from active vehicle evacuation.
+              </div>
+            ) : (
+              <div style={{ marginTop: 5, fontSize: 10.5, color: '#2A6642' }}>
+                Status: <strong>{hoveredResident.evacuation_status}</strong>
+                {hoveredResident.assigned_facility_name && (
+                  <span> • Dest: {hoveredResident.assigned_facility_name}</span>
+                )}
+              </div>
+            )}
 
-          <div style={{ marginTop: 6, fontSize: 10, color: '#888', fontStyle: 'italic' }}>
-            Click facility to open clinical readiness panel
+            <div style={{ marginTop: 5, fontSize: 9.5, color: '#888', fontStyle: 'italic' }}>
+              Click marker to inspect complete record & route
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
+
+      {/* 6. HOVER TOOLTIP FOR MEDICAL FACILITIES (Anchored directly beside facility) */}
+      {hoveredFacility && (() => {
+        const pos = getAnchoredPopupStyle(hoveredFacility.x, hoveredFacility.y, 280, 160);
+        return (
+          <div
+            className="map-tooltip"
+            style={{
+              position: 'absolute',
+              left: pos.left,
+              top: pos.top,
+              transform: 'none',
+              pointerEvents: 'none',
+              zIndex: 105,
+              width: 280,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span className="mono" style={{ fontSize: 11, fontWeight: 700, color: '#77847E' }}>
+                [{hoveredFacility.code}]
+              </span>
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  padding: '2px 6px',
+                  borderRadius: 3,
+                  backgroundColor: hoveredFacility.available_capacity > 0 ? '#E7F2EB' : '#FCECE9',
+                  color: hoveredFacility.available_capacity > 0 ? '#2A6642' : '#BD3423',
+                }}
+              >
+                {hoveredFacility.operational_status}
+              </span>
+            </div>
+
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#1C211F' }}>
+              {hoveredFacility.name}
+            </div>
+
+            <div style={{ fontSize: 11, color: '#68746E', marginTop: 1 }}>
+              {hoveredFacility.neighborhood_name} • {hoveredFacility.facility_type.replace('_', ' ')}
+            </div>
+
+            <div style={{ marginTop: 6, fontSize: 11.5, color: '#1C211F' }}>
+              Available Beds: <strong>{hoveredFacility.available_capacity} free</strong> / {hoveredFacility.total_capacity} total
+            </div>
+
+            <div style={{ marginTop: 4, fontSize: 10.5, color: '#66736D' }}>
+              Access Roadway: <strong>{hoveredFacility.access_road_status}</strong> • Channel: <strong>{hoveredFacility.contact_channel}</strong>
+            </div>
+
+            <div style={{ marginTop: 6, fontSize: 10, color: '#888', fontStyle: 'italic' }}>
+              Click facility to open clinical readiness panel
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 6. COMPACT MAP LEGEND */}
       <div className="map-legend-card">
