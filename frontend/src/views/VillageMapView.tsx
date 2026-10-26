@@ -236,46 +236,54 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   // 1. Mouse-Wheel Zoom Anchored Toward Cursor
+  const handleWheelZoom = useCallback((
+    clientX: number,
+    clientY: number,
+    deltaY: number
+  ) => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const cursorX = clientX - rect.left;
+    const cursorY = clientY - rect.top;
+
+    const currentZoom = zoomRef.current;
+    const currentPan = panRef.current;
+
+    // Smooth zoom factor based on scroll wheel direction
+    const zoomFactor = deltaY < 0 ? 1.15 : 1 / 1.15;
+    const nextZoom = Math.min(3.5, Math.max(0.45, Number((currentZoom * zoomFactor).toFixed(3))));
+    if (nextZoom === currentZoom) return;
+
+    // Anchor geographic point under the cursor
+    const scaleRatio = nextZoom / currentZoom;
+    const nextPanX = Math.round(cursorX - (cursorX - currentPan.x) * scaleRatio);
+    const nextPanY = Math.round(cursorY - (cursorY - currentPan.y) * scaleRatio);
+
+    setIsWheelZooming(true);
+    if (wheelTimeoutRef.current) clearTimeout(wheelTimeoutRef.current);
+    wheelTimeoutRef.current = setTimeout(() => setIsWheelZooming(false), 120);
+
+    setZoom(nextZoom);
+    setPan({ x: nextPanX, y: nextPanY });
+  }, []);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    const handleWheel = (e: WheelEvent) => {
+    const onWheel = (e: WheelEvent) => {
       // Prevent browser default window scrolling while cursor is over the map canvas
       e.preventDefault();
       e.stopPropagation();
-
-      const rect = container.getBoundingClientRect();
-      const cursorX = e.clientX - rect.left;
-      const cursorY = e.clientY - rect.top;
-
-      const currentZoom = zoomRef.current;
-      const currentPan = panRef.current;
-
-      // Smooth zoom factor based on scroll wheel direction
-      const zoomFactor = e.deltaY < 0 ? 1.14 : 1 / 1.14;
-      const nextZoom = Math.min(3.5, Math.max(0.45, Number((currentZoom * zoomFactor).toFixed(3))));
-      if (nextZoom === currentZoom) return;
-
-      // Anchor geographic point under the cursor
-      const scaleRatio = nextZoom / currentZoom;
-      const nextPanX = Math.round(cursorX - (cursorX - currentPan.x) * scaleRatio);
-      const nextPanY = Math.round(cursorY - (cursorY - currentPan.y) * scaleRatio);
-
-      setIsWheelZooming(true);
-      if (wheelTimeoutRef.current) clearTimeout(wheelTimeoutRef.current);
-      wheelTimeoutRef.current = setTimeout(() => setIsWheelZooming(false), 120);
-
-      setZoom(nextZoom);
-      setPan({ x: nextPanX, y: nextPanY });
+      handleWheelZoom(e.clientX, e.clientY, e.deltaY);
     };
 
-    container.addEventListener('wheel', handleWheel, { passive: false });
+    container.addEventListener('wheel', onWheel, { passive: false });
     return () => {
-      container.removeEventListener('wheel', handleWheel);
+      container.removeEventListener('wheel', onWheel);
       if (wheelTimeoutRef.current) clearTimeout(wheelTimeoutRef.current);
     };
-  }, []);
+  }, [mapData, handleWheelZoom]);
 
   // 2. Global Mouse Drag Handlers (Smooth Panning without Losing Grab)
   useEffect(() => {
@@ -561,6 +569,10 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
   return (
     <div
       ref={containerRef}
+      onWheel={(e) => {
+        if (e.cancelable) e.preventDefault();
+        handleWheelZoom(e.clientX, e.clientY, e.deltaY);
+      }}
       style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', backgroundColor: '#F8F6F1' }}
     >
       {/* 1. TOP DOCKED COMPACT INCIDENT & POPULATION SUMMARY STRIP (Clickable KPIs to filter map) */}
@@ -899,6 +911,10 @@ export const VillageMapView: React.FC<VillageMapViewProps> = ({
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
+        onWheel={(e) => {
+          if (e.cancelable) e.preventDefault();
+          handleWheelZoom(e.clientX, e.clientY, e.deltaY);
+        }}
         style={{
           width: '100%',
           height: '100%',
