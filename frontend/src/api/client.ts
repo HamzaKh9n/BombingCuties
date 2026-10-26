@@ -4,7 +4,18 @@ import {
   Vehicle, Responder, AuditEvent, TriageCategory
 } from '../types';
 
-const BASE_URL = '/api';
+const getBaseUrl = (): string => {
+  const envUrl = import.meta.env.VITE_API_URL;
+  if (envUrl) {
+    return envUrl.endsWith('/api') ? envUrl : `${envUrl.replace(/\/+$/, '')}/api`;
+  }
+  if (import.meta.env.DEV) {
+    return '/api';
+  }
+  return 'https://bombingcuties.onrender.com/api';
+};
+
+const BASE_URL = getBaseUrl();
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${url}`, {

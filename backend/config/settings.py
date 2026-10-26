@@ -80,8 +80,20 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
+CORS_ALLOWED_ORIGINS = [
+    'https://bombingcuties.hamzasrajput2k9.workers.dev',
+    'https://bombingcuties.onrender.com',
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:8000',
+    'http://127.0.0.1:5173',
+]
+
 CSRF_TRUSTED_ORIGINS = [
+    'https://bombingcuties.hamzasrajput2k9.workers.dev',
+    'https://bombingcuties.onrender.com',
     'https://*.onrender.com',
+    'https://*.workers.dev',
     'http://localhost:5173',
     'http://localhost:3000',
     'http://127.0.0.1:8000',
